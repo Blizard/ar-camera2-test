@@ -450,8 +450,8 @@ fun configureTransform(textureView: TextureView, streamSize: Size, context: Cont
     Log.d("CameraPreview", "Configuring transform - Rotation: $rotation, View: ${textureView.width}x${textureView.height}, Stream: ${streamSize.width}x${streamSize.height}")
     
     when (rotation) {
-        Surface.ROTATION_90, Surface.ROTATION_270 -> {
-            // Landscape orientations - apply rotation and scaling
+        Surface.ROTATION_90 -> {
+            // Landscape left (counter-clockwise from portrait)
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
             
@@ -461,16 +461,26 @@ fun configureTransform(textureView: TextureView, streamSize: Size, context: Cont
             )
             
             matrix.postScale(scale, scale, centerX, centerY)
+            // For ROTATION_90, we need to rotate -90 degrees (or 270) to correct the orientation
+            matrix.postRotate(-90f, centerX, centerY)
             
-            // Apply rotation for landscape
-            val rotationAngle = when (rotation) {
-                Surface.ROTATION_90 -> 90f
-                Surface.ROTATION_270 -> 270f
-                else -> 0f
-            }
-            matrix.postRotate(rotationAngle, centerX, centerY)
+            Log.d("CameraPreview", "Applied landscape left transform - rotation: -90°, scale: $scale")
+        }
+        Surface.ROTATION_270 -> {
+            // Landscape right (clockwise from portrait)
+            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
             
-            Log.d("CameraPreview", "Applied landscape transform - rotation: ${rotationAngle}°, scale: $scale")
+            val scale = Math.max(
+                textureView.height.toFloat() / streamSize.height,
+                textureView.width.toFloat() / streamSize.width
+            )
+            
+            matrix.postScale(scale, scale, centerX, centerY)
+            // For ROTATION_270, we need to rotate 90 degrees to correct the orientation
+            matrix.postRotate(90f, centerX, centerY)
+            
+            Log.d("CameraPreview", "Applied landscape right transform - rotation: 90°, scale: $scale")
         }
         Surface.ROTATION_180 -> {
             // Upside down portrait
