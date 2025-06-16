@@ -4,7 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.RectF
 import android.util.Size
+import android.view.Display
+import android.view.WindowManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -107,6 +111,8 @@ fun CameraPreview(modifier: Modifier = Modifier) {
                                         },
                                         onPreviewSizeSet = { size ->
                                             previewSize = size
+                                            // Configure transform for proper orientation
+                                            configureTransform(this@apply, size, context)
                                         },
                                         onError = { showSnackbar = true }
                                     )
@@ -118,7 +124,10 @@ fun CameraPreview(modifier: Modifier = Modifier) {
 
                         override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
                             Log.d("CameraPreview", "Surface size changed to: ${width}x${height}")
-                            // Don't reconfigure transform here as it causes issues
+                            // Reconfigure transform when surface size changes
+                            previewSize?.let { size ->
+                                configureTransform(this@apply, size, context)
+                            }
                         }
                         override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean = true
                         override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {}
@@ -422,4 +431,57 @@ fun getOptimalPreviewSize(sizes: Array<Size>, viewWidth: Int, viewHeight: Int): 
     
     Log.d("CameraPreview", "Using fallback size: ${result.width}x${result.height}")
     return result
+}
+
+/**
+ * Configures the TextureView transform matrix to handle device orientation changes.
+ * This fixes camera preview orientation issues in landscape mode.
+ */
+fun configureTransform(textureView: TextureView, streamSize: Size, context: Context) {
+    val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    val rotation = windowManager.defaultDisplay.rotation
+    
+    val matrix = Matrix()
+    val viewRect = RectF(0f, 0f, textureView.width.toFloat(), textureView.height.toFloat())
+    val bufferRect = RectF(0f, 0f, streamSize.height.toFloat(), streamSize.width.toFloat())
+    val centerX = viewRect.centerX()
+    val centerY = viewRect.centerY()
+    
+    Log.d("CameraPreview", "Configuring transform - Rotation: $rotation, View: ${textureView.width}x${textureView.height}, Stream: ${streamSize.width}x${streamSize.height}")
+    
+    when (rotation) {
+        Surface.ROTATION_90, Surface.ROTATION_270 -> {
+            // Landscape orientations - apply rotation and scaling
+            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
+            
+            val scale = Math.max(
+                textureView.height.toFloat() / streamSize.height,
+                textureView.width.toFloat() / streamSize.width
+            )
+            
+            matrix.postScale(scale, scale, centerX, centerY)
+            
+            // Apply rotation for landscape
+            val rotationAngle = when (rotation) {
+                Surface.ROTATION_90 -> 90f
+                Surface.ROTATION_270 -> 270f
+                else -> 0f
+            }
+            matrix.postRotate(rotationAngle, centerX, centerY)
+            
+            Log.d("CameraPreview", "Applied landscape transform - rotation: ${rotationAngle}°, scale: $scale")
+        }
+        Surface.ROTATION_180 -> {
+            // Upside down portrait
+            matrix.postRotate(180f, centerX, centerY)
+            Log.d("CameraPreview", "Applied 180° rotation for upside-down portrait")
+        }
+        Surface.ROTATION_0 -> {
+            // Normal portrait - minimal transform needed
+            Log.d("CameraPreview", "Normal portrait orientation - no transform needed")
+        }
+    }
+    
+    textureView.setTransform(matrix)
 }
