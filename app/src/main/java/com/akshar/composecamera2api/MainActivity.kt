@@ -59,12 +59,14 @@ private fun MainScreen(
     cameraPermissionGranted: Boolean,
     grantCameraPermission: () -> Unit,
 ) {
-    Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-        when {
-            cameraPermissionGranted -> {
-                CameraPreview(modifier = Modifier.padding(innerPadding))
-            }
-            !cameraPermissionGranted -> {
+    when {
+        cameraPermissionGranted -> {
+            // Fullscreen camera preview without any padding
+            CameraPreview(modifier = Modifier.fillMaxSize())
+        }
+        !cameraPermissionGranted -> {
+            // Permission screen with scaffold for proper layout
+            Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                 PermissionScreen(
                     message = "Camera permission is required to use this feature.",
                     onGrantPermission = grantCameraPermission,

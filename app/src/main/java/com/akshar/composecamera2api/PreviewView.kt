@@ -4,7 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
-import android.graphics.SurfaceTexture
+import android.util.Size
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -17,9 +17,14 @@ import android.media.ImageReader
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.util.Size
+import android.hardware.camera2.params.SessionConfiguration
+import android.hardware.camera2.params.OutputConfiguration
+import android.graphics.SurfaceTexture
+import android.util.Log
+import java.util.concurrent.Executors
 import android.view.Surface
 import android.view.TextureView
+import android.view.View.MeasureSpec
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -69,6 +74,7 @@ fun CameraPreview(modifier: Modifier = Modifier) {
     var cameraDevice by remember { mutableStateOf<CameraDevice?>(null) }
     var captureSession by remember { mutableStateOf<CameraCaptureSession?>(null) }
     var imageReader by remember { mutableStateOf<ImageReader?>(null) }
+    var previewSize by remember { mutableStateOf<Size?>(null) }
     var captureMessage by remember { mutableStateOf("") }
 
     // Clean up camera resources when composable is disposed
@@ -88,23 +94,32 @@ fun CameraPreview(modifier: Modifier = Modifier) {
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
                             if (isCamera2Supported(context)) {
-                                openCameraWithCapture(
-                                    context = context,
-                                    textureView = this@apply,
-                                    handler = Handler(Looper.getMainLooper()),
-                                    onCameraOpened = { device, session, reader ->
-                                        cameraDevice = device
-                                        captureSession = session
-                                        imageReader = reader
-                                    },
-                                    onError = { showSnackbar = true }
-                                )
+                                // Post to ensure view dimensions are available
+                                post {
+                                    openCameraWithCapture(
+                                        context = context,
+                                        textureView = this@apply,
+                                        handler = Handler(Looper.getMainLooper()),
+                                        onCameraOpened = { device, session, reader ->
+                                            cameraDevice = device
+                                            captureSession = session
+                                            imageReader = reader
+                                        },
+                                        onPreviewSizeSet = { size ->
+                                            previewSize = size
+                                        },
+                                        onError = { showSnackbar = true }
+                                    )
+                                }
                             } else {
                                 showSnackbar = true
                             }
                         }
 
-                        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {}
+                        override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+                            Log.d("CameraPreview", "Surface size changed to: ${width}x${height}")
+                            // Don't reconfigure transform here as it causes issues
+                        }
                         override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean = true
                         override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {}
                     }
@@ -112,11 +127,11 @@ fun CameraPreview(modifier: Modifier = Modifier) {
             }
         )
 
-        // Capture button positioned at the bottom center
+        // Capture button positioned at the bottom center with system UI consideration
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(32.dp),
+                .padding(bottom = 48.dp, start = 32.dp, end = 32.dp), // Extra bottom padding for navigation bar
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -157,17 +172,19 @@ fun CameraPreview(modifier: Modifier = Modifier) {
                 Text("📷")
             }
         }
-    }
 
-    if (showSnackbar) {
-        LaunchedEffect(snackbarHostState) {
-            snackbarHostState.showSnackbar("Camera2 API is not supported on this device")
+        if (showSnackbar) {
+            LaunchedEffect(snackbarHostState) {
+                snackbarHostState.showSnackbar("Camera2 API is not supported on this device")
+            }
         }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .padding(16.dp)
+                .align(Alignment.TopCenter) // Position at top to avoid overlap with capture button
+        )
     }
-    SnackbarHost(
-        hostState = snackbarHostState,
-        modifier = Modifier.padding(16.dp)
-    )
 }
 
 /**
@@ -187,19 +204,14 @@ fun isCamera2Supported(context: Context): Boolean {
 }
 
 /**
- * Opens the camera with photo capture capability and starts the preview.
- *
- * @param context The context of the application.
- * @param textureView The TextureView to display the camera preview.
- * @param handler The handler to run the camera operations.
- * @param onCameraOpened Callback when camera is successfully opened.
- * @param onError Callback when an error occurs.
+ * Opens the camera with a simpler, more reliable approach.
  */
 fun openCameraWithCapture(
     context: Context, 
     textureView: TextureView, 
     handler: Handler,
     onCameraOpened: (CameraDevice, CameraCaptureSession, ImageReader) -> Unit,
+    onPreviewSizeSet: (Size) -> Unit,
     onError: () -> Unit
 ) {
     val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -210,49 +222,79 @@ fun openCameraWithCapture(
         return
     }
 
-    // Get the largest available size for the image capture
-    val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-    val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
-    val largestSize = map.getOutputSizes(ImageFormat.JPEG).maxByOrNull { it.height * it.width }!!
+    try {
+        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+        
+        // Get available sizes
+        val previewSizes = map.getOutputSizes(SurfaceTexture::class.java)
+        val jpegSizes = map.getOutputSizes(ImageFormat.JPEG)
+        
+        // Choose preview size - use a common resolution
+        val previewSize = getOptimalPreviewSize(previewSizes, textureView.width, textureView.height)
+        val jpegSize = jpegSizes.maxByOrNull { it.width * it.height } ?: jpegSizes[0]
+        
+        Log.d("CameraPreview", "Selected preview size: ${previewSize.width}x${previewSize.height}")
+        Log.d("CameraPreview", "TextureView size: ${textureView.width}x${textureView.height}")
+        
+        // Set up TextureView with the chosen size
+        textureView.surfaceTexture?.setDefaultBufferSize(previewSize.width, previewSize.height)
+        onPreviewSizeSet(previewSize)
+        
+        // Create ImageReader for photo capture
+        val imageReader = ImageReader.newInstance(jpegSize.width, jpegSize.height, ImageFormat.JPEG, 1)
+        
+        // Create surfaces
+        val previewSurface = Surface(textureView.surfaceTexture)
+        val readerSurface = imageReader.surface
+        
+        cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+            override fun onOpened(camera: CameraDevice) {
+                // Use legacy API for better compatibility
+                camera.createCaptureSession(
+                    listOf(previewSurface, readerSurface),
+                    object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(session: CameraCaptureSession) {
+                            try {
+                                // Create preview request
+                                val previewRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                                    addTarget(previewSurface)
+                                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                                    set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                                }
+                                
+                                session.setRepeatingRequest(previewRequest.build(), null, handler)
+                                onCameraOpened(camera, session, imageReader)
+                            } catch (e: Exception) {
+                                Log.e("CameraPreview", "Failed to start preview", e)
+                                onError()
+                            }
+                        }
 
-    // Set up ImageReader for photo capture
-    val imageReader = ImageReader.newInstance(largestSize.width, largestSize.height, ImageFormat.JPEG, 1)
-
-    cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-        override fun onOpened(camera: CameraDevice) {
-            val previewSurface = Surface(textureView.surfaceTexture)
-            val captureSurface = imageReader.surface
-            
-            val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                addTarget(previewSurface)
+                        override fun onConfigureFailed(session: CameraCaptureSession) {
+                            Log.e("CameraPreview", "Session configuration failed")
+                            onError()
+                        }
+                    },
+                    handler
+                )
             }
-            
-            camera.createCaptureSession(
-                listOf(previewSurface, captureSurface), 
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        captureRequest.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-                        session.setRepeatingRequest(captureRequest.build(), null, handler)
-                        onCameraOpened(camera, session, imageReader)
-                    }
 
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
-                        onError()
-                    }
-                }, 
-                handler
-            )
-        }
+            override fun onDisconnected(camera: CameraDevice) {
+                camera.close()
+            }
 
-        override fun onDisconnected(camera: CameraDevice) {
-            camera.close()
-        }
-
-        override fun onError(camera: CameraDevice, error: Int) {
-            camera.close()
-            onError()
-        }
-    }, handler)
+            override fun onError(camera: CameraDevice, error: Int) {
+                Log.e("CameraPreview", "Camera error: $error")
+                camera.close()
+                onError()
+            }
+        }, handler)
+    } catch (e: Exception) {
+        Log.e("CameraPreview", "Failed to open camera", e)
+        onError()
+    }
 }
 
 /**
@@ -324,7 +366,6 @@ fun capturePhoto(
 /**
  * Saves the captured image to device storage.
  *
- * @param context The context of the application.
  * @param image The captured image.
  * @param onComplete Callback when save operation is complete.
  */
@@ -357,4 +398,28 @@ fun saveImageToStorage(
     } catch (e: IOException) {
         onComplete(false, "Failed to save photo: ${e.message}")
     }
+}
+
+/**
+ * Get optimal preview size using a simple, fixed approach.
+ */
+fun getOptimalPreviewSize(sizes: Array<Size>, viewWidth: Int, viewHeight: Int): Size {
+    Log.d("CameraPreview", "Available sizes: ${sizes.joinToString { "${it.width}x${it.height}" }}")
+    
+    // Use a fixed size that works well for fullscreen
+    val targetSize = Size(1280, 720) // 16:9 aspect ratio
+    
+    // Check if our target size is available
+    val match = sizes.find { it.width == targetSize.width && it.height == targetSize.height }
+    if (match != null) {
+        Log.d("CameraPreview", "Using target size: ${match.width}x${match.height}")
+        return match
+    }
+    
+    // Fallback to largest available size under 1920x1080
+    val result = sizes.filter { it.width <= 1920 && it.height <= 1080 }
+                       .maxByOrNull { it.width * it.height } ?: sizes[0]
+    
+    Log.d("CameraPreview", "Using fallback size: ${result.width}x${result.height}")
+    return result
 }
